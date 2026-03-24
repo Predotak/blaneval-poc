@@ -5,7 +5,7 @@ import * as cheerio from "cheerio";
 // ─────────────────────────────────────────────
 // CONFIG — fill these in before running
 // ─────────────────────────────────────────────
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "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";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "YOUR_KEY_HERE";
 const MODEL = "meta-llama/llama-3.3-70b-instruct"; // swap freely on OpenRouter
 const TARGET_URLS = [
   "https://www.hali.ie/",
