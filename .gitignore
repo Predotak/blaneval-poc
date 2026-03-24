@@ -1,0 +1,12 @@
+node_modules/
+.next/
+.env.local
+.env*.local
+*.png
+.DS_Store
+
+# Test scripts from POC iteration
+test-*.js
+launcher-element.png
+page-with-launcher.png
+after-click.png
