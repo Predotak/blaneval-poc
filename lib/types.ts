@@ -8,7 +8,7 @@ export interface VendorFingerprint {
 
 export interface DetectionResult {
   found: boolean;
-  method: "fingerprint" | "iframe-domain" | "ai" | "fixed-scanner" | "none";
+  method: "fingerprint" | "iframe-domain" | "ai" | "visual" | "fixed-scanner" | "none";
   vendor?: string;
   confidence: "high" | "medium" | "low";
   widgetType?: string;
@@ -16,10 +16,25 @@ export interface DetectionResult {
   iframeSelector?: string;
   notes?: string;
   screenshotBase64?: string;
+  chatOpenScreenshotBase64?: string;
+}
+
+export interface CandidateScreenshot {
+  index: number;
+  label: string;
+  base64: string;
+  isMatch?: boolean;
+}
+
+export interface PageScreenshot {
+  label: string;
+  base64: string;
 }
 
 export interface DetectionEvent {
-  type: "status" | "result" | "error" | "done";
+  type: "status" | "result" | "error" | "done" | "candidate" | "screenshot";
   message?: string;
   data?: DetectionResult;
+  candidate?: CandidateScreenshot;
+  screenshot?: PageScreenshot;
 }

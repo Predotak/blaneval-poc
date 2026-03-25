@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import { handleCookieConsent } from "@/lib/cookie-consent";
 import { detectChat } from "@/lib/detect-chat";
+import { openChatAndScreenshot } from "@/lib/open-chat";
 import type { DetectionEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -14,8 +15,14 @@ export async function GET(request: Request) {
     return Response.json({ error: "Missing url parameter" }, { status: 400 });
   }
 
+  // Auto-prepend https:// if no protocol
+  let normalizedUrl = url.trim();
+  if (!/^https?:\/\//i.test(normalizedUrl)) {
+    normalizedUrl = `https://${normalizedUrl}`;
+  }
+
   try {
-    new URL(url);
+    new URL(normalizedUrl);
   } catch {
     return Response.json({ error: "Invalid URL" }, { status: 400 });
   }
@@ -60,8 +67,8 @@ export async function GET(request: Request) {
         page.on("console", () => {});
         page.on("pageerror", () => {});
 
-        send({ type: "status", message: `Loading ${url}...` });
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+        send({ type: "status", message: `Loading ${normalizedUrl}...` });
+        await page.goto(normalizedUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
         await page.waitForTimeout(3000);
 
         send({ type: "status", message: "Handling cookie consent..." });
@@ -71,10 +78,33 @@ export async function GET(request: Request) {
         }
         await page.waitForTimeout(3000);
 
+        // Screenshot after cookie handling for visual reference
+        try {
+          const buf = await page.screenshot({ timeout: 5000 });
+          send({
+            type: "screenshot",
+            screenshot: { label: cookieHandled ? "After cookie consent" : "Page loaded (no cookie banner)", base64: buf.toString("base64") },
+          });
+        } catch {}
+
+
         send({ type: "status", message: "Running detection pipeline..." });
-        const result = await detectChat(page, url, (message) => {
-          send({ type: "status", message });
-        });
+        const result = await detectChat(
+          page,
+          normalizedUrl,
+          (message) => send({ type: "status", message }),
+          (candidate) => send({ type: "candidate", candidate })
+        );
+
+        // Try to open the chat and screenshot it
+        if (result.found) {
+          const chatScreenshot = await openChatAndScreenshot(page, result, (message) => {
+            send({ type: "status", message });
+          });
+          if (chatScreenshot) {
+            result.chatOpenScreenshotBase64 = chatScreenshot;
+          }
+        }
 
         send({ type: "result", data: result });
         send({ type: "done" });

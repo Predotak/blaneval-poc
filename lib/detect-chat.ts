@@ -2,10 +2,13 @@ import type { Page } from "playwright";
 import * as cheerio from "cheerio";
 import type { DetectionResult } from "./types";
 import { KNOWN_VENDORS } from "./vendors";
-import { callLLM, CHAT_DETECTION_PROMPT } from "./llm";
-import { findChatLauncher } from "./fixed-scanner";
+import { callLLM, CHAT_DETECTION_PROMPT, callVisionLLM, VISUAL_CHAT_DETECTION_PROMPT } from "./llm";
+import { findChatLauncher, findAllCandidates } from "./fixed-scanner";
+
+import type { CandidateScreenshot } from "./types";
 
 type ProgressFn = (message: string) => void;
+type CandidateFn = (candidate: CandidateScreenshot) => void;
 
 const CHAT_DOMAIN_PATTERNS = [
   /chat/, /livechat/, /support/, /helpdesk/, /messenger/,
@@ -119,7 +122,7 @@ async function detectByIframeDomain(page: Page, onProgress: ProgressFn): Promise
 }
 
 // Pass 2: LLM-based DOM analysis
-async function detectByLLM(page: Page, url: string, onProgress: ProgressFn): Promise<DetectionResult | null> {
+async function detectByLLM(page: Page, url: string, onProgress: ProgressFn, hints?: { chatScript?: string }): Promise<DetectionResult | null> {
   onProgress("Pass 2: Running AI DOM analysis...");
 
   const html = await page.content();
@@ -153,6 +156,10 @@ async function detectByLLM(page: Page, url: string, onProgress: ProgressFn): Pro
 
   onProgress(`  Iframes: ${iframeSrcs.length}, Scripts: ${scriptSrcs.length}, Fixed elements: ${fixedElements.length}`);
 
+  const hintSection = hints?.chatScript
+    ? `\n\nIMPORTANT HINT: A chat-related script was already detected: ${hints.chatScript}\nThis strongly suggests a chat widget exists. Focus on finding its launcher element — it may be inside an iframe.`
+    : "";
+
   const userPrompt = `Page URL: ${url}
 
 DOM snapshot (condensed):
@@ -165,7 +172,7 @@ Script sources:
 ${scriptSrcs.join("\n")}
 
 Fixed/sticky-position visible elements:
-${fixedElements.length > 0 ? fixedElements.join("\n") : "(none)"}`;
+${fixedElements.length > 0 ? fixedElements.join("\n") : "(none)"}${hintSection}`;
 
   onProgress("  Calling LLM...");
   const aiResult = await callLLM(CHAT_DETECTION_PROMPT, userPrompt);
@@ -260,7 +267,8 @@ async function logFixedElements(page: Page, onProgress: ProgressFn) {
 export async function detectChat(
   page: Page,
   url: string,
-  onProgress: ProgressFn
+  onProgress: ProgressFn,
+  onCandidate?: CandidateFn
 ): Promise<DetectionResult> {
   // Log page title for context
   const title = await page.title();
@@ -290,10 +298,13 @@ export async function detectChat(
   }
 
   // Pass 1.75a: Script source detection
+  // This is a signal, not a final answer — only return early if we also find a launcher
   onProgress("Pass 1.75a: Checking script sources for chat platforms...");
+  let chatScriptHint: string | null = null;
+
   const chatScript = await page.evaluate(() => {
     const patterns = /chat|livechat|smartsupp|tawk|crisp|intercom|drift|hubspot|zendesk|tidio|messenger|amio|freshchat|olark|jivochat|gorgias|helpscout|userlike|comm100|kayako|liveperson|botpress|voiceflow|chatwoot/i;
-    for (const s of document.querySelectorAll("script[src]")) {
+    for (const s of document.querySelectorAll<HTMLScriptElement>("script[src]")) {
       if (patterns.test(s.src)) return s.src;
     }
     return null;
@@ -301,29 +312,31 @@ export async function detectChat(
 
   if (chatScript) {
     onProgress(`  ✓ Chat script found: ${chatScript.slice(0, 100)}`);
+    chatScriptHint = chatScript;
+
+    // Only return early if we can also find the launcher on the main page
     const launcher = await findChatLauncher(page);
-    const screenshot = launcher?.id ? await screenshotLauncher(page, `#${launcher.id}`) : undefined;
+    if (launcher?.id) {
+      onProgress(`  ✓ Launcher also found: #${launcher.id}`);
+      const screenshot = await screenshotLauncher(page, `#${launcher.id}`);
 
-    let vendor = "unknown";
-    try {
-      const hostname = new URL(chatScript).hostname;
-      vendor = hostname;
-    } catch {
-      const match = chatScript.match(/\/([^/]+?)(?:\.js)?$/);
-      if (match) vendor = match[1];
+      let vendor = "unknown";
+      try { vendor = new URL(chatScript).hostname; } catch {}
+
+      return {
+        found: true,
+        method: "fingerprint",
+        vendor,
+        confidence: "high",
+        widgetType: `Chat widget (detected via script: ${chatScript.slice(0, 60)})`,
+        launcherSelector: `#${launcher.id}`,
+        screenshotBase64: screenshot,
+      };
     }
-
-    return {
-      found: true,
-      method: "fingerprint",
-      vendor,
-      confidence: "high",
-      widgetType: `Chat widget (detected via script: ${chatScript.slice(0, 60)})`,
-      launcherSelector: launcher?.id ? `#${launcher.id}` : undefined,
-      screenshotBase64: screenshot,
-    };
+    onProgress("  Script found but no launcher on main page — will pass hint to LLM.");
+  } else {
+    onProgress("  No chat scripts found.");
   }
-  onProgress("  No chat scripts found.");
 
   // Pass 1.75b: Custom element tag scan
   onProgress("Pass 1.75: Scanning for chat-related custom elements...");
@@ -372,46 +385,148 @@ export async function detectChat(
   onProgress("  No chat-related custom elements found.");
 
   // Pass 2
+  let aiResult: DetectionResult | null = null;
   try {
-    const ai = await detectByLLM(page, url, onProgress);
-    if (ai) {
-      onProgress(`Found: ${ai.widgetType} (AI analysis)`);
+    aiResult = await detectByLLM(page, url, onProgress, {
+      chatScript: chatScriptHint ?? undefined,
+    });
+    if (aiResult) {
+      onProgress(`Found: ${aiResult.widgetType} (AI analysis, confidence: ${aiResult.confidence})`);
       const launcher = await findChatLauncher(page);
       if (launcher?.id) {
         onProgress(`  Launcher via fixed-scanner: #${launcher.id} (${launcher.area}px²)`);
-        ai.launcherSelector = ai.launcherSelector || `#${launcher.id}`;
-        ai.screenshotBase64 = await screenshotLauncher(page, `#${launcher.id}`);
+        aiResult.launcherSelector = aiResult.launcherSelector || `#${launcher.id}`;
+        aiResult.screenshotBase64 = await screenshotLauncher(page, `#${launcher.id}`);
       }
-      return ai;
+      // Always continue to Pass 3 for visual verification
+      onProgress("  Continuing to Pass 3 for visual verification...");
     }
   } catch (err) {
     onProgress(`AI detection failed: ${(err as Error).message}`);
   }
 
-  // Final fallback: fixed-position scanner
-  onProgress("Fallback: Scanning fixed-position elements...");
-  await logFixedElements(page, onProgress);
+  // Pass 3: Visual analysis — screenshot ALL fixed/sticky elements and ask vision LLM
+  onProgress("Pass 3: Visual analysis of candidate elements...");
+  try {
+    let candidates = await findAllCandidates(page);
+    onProgress(`  findAllCandidates: ${candidates.length} elements`);
 
-  const launcher = await findChatLauncher(page);
-  if (launcher) {
-    onProgress(`Possible launcher found: #${launcher.id} (${launcher.area}px², hint="${launcher.hint}")`);
-    const screenshot = launcher.id
-      ? await screenshotLauncher(page, `#${launcher.id}`)
-      : undefined;
-    return {
-      found: true,
-      method: "fixed-scanner",
-      confidence: "low",
-      widgetType: "Possible chat widget (detected by position heuristic)",
-      launcherSelector: launcher.id ? `#${launcher.id}` : undefined,
-      notes: `Fixed-position element: ${launcher.hint}`,
-      screenshotBase64: screenshot,
-    };
+    // If findAllCandidates found nothing, gather ALL visible fixed/sticky elements as fallback
+    if (candidates.length === 0) {
+      onProgress("  Expanding search to all visible fixed/sticky elements...");
+      candidates = await page.evaluate(() => {
+        const results: { id: string; tag: string; area: number; hint: string; selector: string }[] = [];
+        for (const el of document.querySelectorAll("*")) {
+          const style = window.getComputedStyle(el);
+          if (style.position !== "fixed" && style.position !== "sticky") continue;
+          if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) continue;
+          // Skip full-screen overlays
+          if (rect.width > window.innerWidth * 0.9 && rect.height > window.innerHeight * 0.9) continue;
+          const tag = el.tagName.toLowerCase();
+          const cls = el.className?.toString?.() ?? "";
+          const firstClass = cls.split(/\s+/).filter(Boolean)[0] || "";
+          const hint = [tag, el.id, cls, el.getAttribute("aria-label") || ""].join(" ").toLowerCase().trim().slice(0, 80);
+          const selector = el.id ? `#${el.id}` : (firstClass ? `${tag}.${firstClass}` : tag);
+          results.push({ id: el.id || "", tag, area: Math.round(rect.width * rect.height), hint, selector });
+        }
+        results.sort((a, b) => a.area - b.area);
+        return results.slice(0, 5);
+      });
+      onProgress(`  Expanded search: ${candidates.length} elements`);
+    }
+
+    if (candidates.length > 0) {
+      // Disable animations for stable screenshots
+      await page.addStyleTag({
+        content: "*, *::before, *::after { animation: none !important; transition: none !important; }",
+      });
+
+      // Screenshot each candidate
+      const images: { base64: string; label: string }[] = [];
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        const sel = c.selector || (c.id ? `#${c.id}` : c.tag);
+        try {
+          const el = page.locator(sel).first();
+          const visible = await el.isVisible({ timeout: 1000 }).catch(() => false);
+          if (visible) {
+            const buffer = await el.screenshot({ timeout: 3000 });
+            const b64 = buffer.toString("base64");
+            const label = `Element ${i}: <${c.tag}> ${c.hint} (${c.area}px²)`;
+            images.push({ base64: b64, label });
+            onCandidate?.({ index: i, label, base64: b64 });
+            onProgress(`  ✓ Screenshot ${i}: <${c.tag}> ${c.hint.slice(0, 40)} (${c.area}px²)`);
+          } else {
+            onProgress(`  ✗ Element ${i} not visible: ${sel}`);
+          }
+        } catch {
+          onProgress(`  ✗ Could not screenshot element ${i}: ${sel}`);
+        }
+      }
+
+      if (images.length > 0) {
+        onProgress(`  Sending ${images.length} screenshots to vision LLM...`);
+        const textPrompt = `I have ${images.length} screenshots of fixed-position UI elements from ${url}.\n\n` +
+          images.map((img, i) => `Image ${i}: ${img.label}`).join("\n") +
+          "\n\nWhich one (if any) is a chat widget launcher?";
+
+        const visionResult = await callVisionLLM(
+          VISUAL_CHAT_DETECTION_PROMPT,
+          textPrompt,
+          images
+        );
+
+        onProgress(`  Vision LLM raw response: ${visionResult.slice(0, 300)}`);
+
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(visionResult);
+        } catch {
+          const match = visionResult.match(/\{[\s\S]*\}/);
+          parsed = match ? JSON.parse(match[0]) : { chat_launcher_index: null };
+        }
+
+        // Log each candidate's verdict
+        const verdicts = parsed.candidates as { index: number; is_chat: boolean; reason: string }[] | undefined;
+        if (verdicts && Array.isArray(verdicts)) {
+          for (const v of verdicts) {
+            const icon = v.is_chat ? "✓" : "✗";
+            onProgress(`  ${icon} Element ${v.index}: ${v.reason}`);
+          }
+        }
+
+        const idx = parsed.chat_launcher_index;
+        if (typeof idx === "number" && idx >= 0 && idx < candidates.length) {
+          const winner = candidates[idx];
+          const winnerSel = winner.selector || (winner.id ? `#${winner.id}` : winner.tag);
+          onProgress(`  ✓ Visual match: element ${idx} — <${winner.tag}> ${winner.hint}`);
+          onCandidate?.({ index: idx, label: `Match: <${winner.tag}> ${winner.hint}`, base64: images[idx]?.base64 ?? "", isMatch: true });
+
+          return {
+            found: true,
+            method: "visual",
+            confidence: (parsed.confidence as "high" | "medium" | "low") || "medium",
+            widgetType: `Chat launcher (visually identified: ${(parsed.reason as string) || winner.hint})`,
+            launcherSelector: winnerSel,
+            screenshotBase64: images[idx]?.base64,
+            notes: (parsed.reason as string) || undefined,
+          };
+        }
+        onProgress("  Vision LLM: no chat launcher identified.");
+      }
+    }
+  } catch (err) {
+    onProgress(`  Visual analysis failed: ${(err as Error).message}`);
   }
 
-  // Log everything we see for debugging
-  onProgress("Debug: All fixed-position elements on page:");
-  await logFixedElements(page, onProgress);
+  // If Pass 2 found something with medium/low confidence but Pass 3 didn't confirm,
+  // still return the AI result as best guess
+  if (aiResult) {
+    onProgress(`Returning AI result (${aiResult.confidence} confidence, unconfirmed by visual pass).`);
+    return aiResult;
+  }
 
   onProgress("No chat widget detected.");
   return {

@@ -1,13 +1,15 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
-import type { DetectionEvent, DetectionResult } from "@/lib/types";
+import type { DetectionEvent, DetectionResult, CandidateScreenshot, PageScreenshot } from "@/lib/types";
 
 export function Scanner() {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<"idle" | "scanning" | "done" | "error">("idle");
   const [logs, setLogs] = useState<string[]>([]);
   const [result, setResult] = useState<DetectionResult | null>(null);
+  const [candidates, setCandidates] = useState<CandidateScreenshot[]>([]);
+  const [screenshots, setScreenshots] = useState<PageScreenshot[]>([]);
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -22,6 +24,8 @@ export function Scanner() {
     setStatus("scanning");
     setLogs([]);
     setResult(null);
+    setCandidates([]);
+    setScreenshots([]);
     setError(null);
 
     // Close previous connection if any
@@ -36,6 +40,16 @@ export function Scanner() {
       switch (data.type) {
         case "status":
           addLog(data.message ?? "");
+          break;
+        case "screenshot":
+          if (data.screenshot) {
+            setScreenshots((prev) => [...prev, data.screenshot!]);
+          }
+          break;
+        case "candidate":
+          if (data.candidate) {
+            setCandidates((prev) => [...prev, data.candidate!]);
+          }
           break;
         case "result":
           setResult(data.data ?? null);
@@ -64,6 +78,8 @@ export function Scanner() {
     setStatus("idle");
     setLogs([]);
     setResult(null);
+    setCandidates([]);
+    setScreenshots([]);
     setError(null);
   };
 
@@ -76,7 +92,7 @@ export function Scanner() {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && status !== "scanning" && handleScan()}
-          placeholder="https://example.com"
+          placeholder="example.com"
           disabled={status === "scanning"}
           className="flex-1 px-4 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600 disabled:opacity-50"
         />
@@ -118,6 +134,54 @@ export function Scanner() {
         </div>
       )}
 
+      {/* Page Screenshots */}
+      {screenshots.length > 0 && (
+        <div className="space-y-3">
+          {screenshots.map((s, i) => (
+            <div key={i} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-2">
+              <div className="text-xs text-zinc-500 font-medium uppercase tracking-wide">
+                {s.label}
+              </div>
+              <img
+                src={`data:image/png;base64,${s.base64}`}
+                alt={s.label}
+                className="w-full rounded-lg border border-zinc-700"
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Candidate Screenshots */}
+      {candidates.length > 0 && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
+          <div className="text-xs text-zinc-500 font-medium uppercase tracking-wide">
+            Visual candidates ({candidates.length})
+          </div>
+          <div className="flex gap-3 flex-wrap">
+            {candidates.map((c) => (
+              <div
+                key={c.index}
+                className={`relative rounded-lg border p-1 ${
+                  c.isMatch
+                    ? "border-green-500 ring-2 ring-green-500/30"
+                    : "border-zinc-700"
+                }`}
+              >
+                <img
+                  src={`data:image/png;base64,${c.base64}`}
+                  alt={c.label}
+                  className="h-16 w-auto rounded object-contain bg-zinc-800"
+                />
+                <div className="text-[10px] text-zinc-500 mt-1 max-w-[80px] truncate">
+                  {c.isMatch ? "✓ Match" : `#${c.index}`}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Error */}
       {error && (
         <div className="bg-red-950/50 border border-red-900 rounded-lg p-4 text-red-300">
@@ -145,6 +209,7 @@ function ResultCard({ result }: { result: DetectionResult }) {
     fingerprint: "Vendor Fingerprint",
     "iframe-domain": "Iframe Domain",
     ai: "AI Analysis",
+    visual: "Visual Analysis",
     "fixed-scanner": "Position Heuristic",
   };
 
@@ -194,6 +259,19 @@ function ResultCard({ result }: { result: DetectionResult }) {
 
       {result.notes && (
         <p className="text-sm text-zinc-400">{result.notes}</p>
+      )}
+
+      {result.chatOpenScreenshotBase64 && (
+        <div className="space-y-2">
+          <div className="text-xs text-zinc-500 font-medium uppercase tracking-wide">
+            Chat opened
+          </div>
+          <img
+            src={`data:image/png;base64,${result.chatOpenScreenshotBase64}`}
+            alt="Chat widget opened"
+            className="w-full rounded-lg border border-zinc-700"
+          />
+        </div>
       )}
     </div>
   );

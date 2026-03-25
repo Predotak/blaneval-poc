@@ -1,15 +1,22 @@
 import type { Page } from "playwright";
 
 const ACCEPT_SELECTORS = [
+  // Complianz (must be before generic selectors — has specific class)
+  ".cmplz-btn.cmplz-accept",
+  ".cmplz-accept",
+  "button.cmplz-btn",
+  // CookieBot
+  "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+  "#CybotCookiebotDialogBodyButtonAccept",
+  // OneTrust
+  "#onetrust-accept-btn-handler",
+  // CookieYes
+  ".cky-btn-accept",
+  // Generic patterns
   "button[id*='accept' i]",
   "button[class*='accept' i]",
   "a[id*='accept' i]",
   "button[data-action='accept']",
-  "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
-  "#CybotCookiebotDialogBodyButtonAccept",
-  "#onetrust-accept-btn-handler",
-  ".cmplz-accept",
-  ".cky-btn-accept",
   "button:has-text('Accept All')",
   "button:has-text('Accept all')",
   "button:has-text('Accept Cookies')",

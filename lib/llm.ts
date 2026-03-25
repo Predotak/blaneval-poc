@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 
 const MODEL = "meta-llama/llama-3.3-70b-instruct";
+const VISION_MODEL = "google/gemini-2.0-flash-001";
 
 function getClient() {
   const apiKey = process.env.OPENROUTER_API_KEY;
@@ -66,4 +67,77 @@ If you find a chat widget, respond ONLY with this JSON:
 If no chat widget is found, respond ONLY with:
 { "found": false, "notes": "reason why no chat was found" }
 
+Never include markdown or explanations outside the JSON.`;
+
+export async function callVisionLLM(
+  systemPrompt: string,
+  textPrompt: string,
+  images: { base64: string; label: string }[],
+  retries = 3
+): Promise<string> {
+  const client = getClient();
+
+  const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
+    { type: "text", text: textPrompt },
+    ...images.map((img) => ({
+      type: "image_url" as const,
+      image_url: { url: `data:image/png;base64,${img.base64}` },
+    })),
+  ];
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await client.chat.completions.create({
+        model: VISION_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content },
+        ],
+        temperature: 0.2,
+        max_tokens: 1024,
+      });
+      return res.choices[0].message.content?.trim() ?? "";
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status;
+      if (status === 429 && attempt < retries) {
+        await new Promise((r) => setTimeout(r, attempt * 5000));
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw new Error("Vision LLM call failed after retries");
+}
+
+export const VISUAL_CHAT_DETECTION_PROMPT = `You are an expert at visually identifying chat widget launchers on websites.
+
+You will receive screenshots of individual UI elements found on a webpage. Each image is a fixed-position element that could potentially be a chat launcher.
+
+Chat launchers typically look like:
+- A speech bubble icon
+- A messaging/chat icon
+- A headset/support icon
+- A small circular or rounded button with a chat-related icon
+- An avatar or bot icon
+- A text button saying "Chat", "Help", "Support", "Message us" (in any language)
+
+NOT chat launchers:
+- Cookie consent buttons
+- Accessibility widgets (wheelchair icons)
+- Scroll-to-top arrows
+- Navigation menus or headers
+- Social media share buttons
+- reCAPTCHA badges
+
+For each image, I will label it with an index number. Analyze EVERY element and respond ONLY with this JSON:
+{
+  "candidates": [
+    { "index": 0, "is_chat": true/false, "reason": "brief explanation" },
+    { "index": 1, "is_chat": true/false, "reason": "brief explanation" }
+  ],
+  "chat_launcher_index": <number or null>,
+  "confidence": "high|medium|low"
+}
+
+The "candidates" array must have one entry per image. Set chat_launcher_index to the index of the best chat launcher, or null if none found.
 Never include markdown or explanations outside the JSON.`;
